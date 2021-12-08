@@ -1,0 +1,426 @@
+---
+title: "Analysing International Football Performance"
+author: "Alif Naufal"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged
+  pdf_document: default
+---
+
+Updated: 8 December 2021
+
+```{r include = FALSE}
+
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+```
+
+
+Datasets used:
+
+International football results [Source](https://www.kaggle.com/martj42/international-football-results-from-1872-to-2017)
+
+National Association Football Teams by Region [Source](https://www.kaggle.com/rafalsiemieniuk/regions)
+
+Firstly, we load the relevant libraries and dataset and get a summary to see if there are any issues with the data.
+
+```{r}
+
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(ggpmisc)
+library(tidyr)
+library(viridis)
+library(sandwich)
+library(lmtest)
+library(predict3d)
+
+results <- read.csv('results.csv', stringsAsFactors = FALSE)
+shootouts <- read.csv('shootouts.csv', stringsAsFactors = FALSE)
+regions <- read.csv('national_association_football_teams_updated.csv', stringsAsFactors = FALSE)
+
+#summary(results)
+#str(results)
+#summary(shootouts)
+#str(shootouts)
+#summary(regions)
+#str(regions)
+```
+
+Only 1 NA result, we will omit it.
+We will also convert date to date format.
+
+```{r}
+results <- na.omit(results)
+results$date <- as.Date(results$date, "%Y-%m-%d")
+
+shootouts$date <- as.Date(shootouts$date, "%Y-%m-%d")
+```
+
+## Historical performance 
+
+In order to analyse performance, we will express each match in terms of winning team and losing team, not just home team and away team. For this analysis, we will also check against the 'shootouts.csv' dataset to see if draws were resolved with a penalty shoot-out and consider the winning team and losing team accordingly. At this point we will also add in the regions that each nation belongs to.
+
+```{r}
+
+# helper function to find winning team
+winner_f <- function(home_score, away_score, home_team, away_team) {
+  winning_team <- NA
+  if (home_score > away_score) {
+    winning_team <- home_team
+  }
+  if (home_score < away_score) {
+    winning_team <- away_team
+  }
+  return (winning_team)
+}
+
+# helper function to find losing team
+loser_f <- function(home_score, away_score, home_team, away_team) {
+  losing_team <- NA
+  if (home_score < away_score) {
+    losing_team <- home_team
+  }
+  if (home_score > away_score) {
+    losing_team <- away_team
+  }
+  return (losing_team)
+}
+
+shootouts <- shootouts %>%
+  mutate(
+    loser = if_else(winner == home_team, away_team, home_team)
+  )
+
+#head(shootouts)
+
+# first join with shootouts, then add winners & losers and regions
+results_by_country <- results %>% 
+  left_join(shootouts, by = c("date", "home_team", "away_team")) %>%
+  mutate(
+    year = as.numeric(format(date, "%Y"))
+  ) %>% 
+  rowwise() %>%
+  mutate(
+    winning_team = ifelse(is.na(winner), winner_f(home_score, away_score, home_team, away_team), winner), 
+    losing_team = ifelse(is.na(loser), loser_f(home_score, away_score, home_team, away_team), loser)
+  ) %>%
+  select(-c(winner, loser)) %>%
+  inner_join(regions, by = c("home_team" = "country")) %>%
+  rename(home_region = region) %>%
+  inner_join(regions, by = c("away_team" = "country")) %>%
+  rename(away_region = region) %>%
+  mutate(
+    winning_region = ifelse(winning_team == home_team, home_region, away_region)
+  ) %>%
+  ungroup()
+
+#head(results_by_country)
+```
+
+Summarising which countries have the most wins, unsurprisingly, we find the traditional footballing powerhouses.
+
+```{r}
+all_wins <- tibble(
+  country = results_by_country$winning_team
+) %>% 
+  group_by(country) %>%
+  summarise(wins = length(country)) %>%
+  arrange(desc(wins)) %>%
+  na.omit()
+
+head(all_wins, 10)
+```
+
+Looking at win % instead (excluding countries with less than 100 matches played), we find similar results.
+
+```{r}
+country_by_year <- tibble(
+  country = c(results_by_country$home_team, results_by_country$away_team),
+  year = c(results_by_country$year, results_by_country$year)
+) %>% 
+  arrange(year)
+
+all_matches <- country_by_year %>%
+  group_by(country) %>%
+  summarise(total_matches = length(country)) %>%
+  na.omit()
+
+all_wins_percentage <- full_join(all_matches, all_wins) %>%
+  mutate(
+    win_percentage = round(wins/total_matches * 100, 2)
+  ) %>%
+  filter(total_matches >= 100) %>%
+  arrange(desc(win_percentage))
+
+head(all_wins_percentage, 10)
+```
+
+What about wins and win % in competitive matches (excluding friendlies)?
+
+```{r}
+results_official <- results_by_country %>%
+  filter(tournament != 'Friendly')
+
+country_by_year_official <- tibble(
+  country = c(results_official$home_team, results_official$away_team),
+  year = c(results_official$year, results_official$year)
+) %>% 
+  arrange(year)
+
+all_matches_official <- country_by_year_official %>%
+  group_by(country) %>%
+  summarise(total_matches = length(country)) %>%
+  na.omit()
+
+all_wins_official <- tibble(
+  country = results_official$winning_team
+) %>% 
+  group_by(country) %>%
+  summarise(wins = length(country)) %>%
+  arrange(desc(wins)) %>%
+  na.omit()
+
+all_wins_percentage_official <- full_join(all_matches_official, all_wins_official) %>%
+  mutate(
+    win_percentage = round(wins/total_matches * 100, 2)
+  ) %>%
+  filter(total_matches >= 100) %>%
+  arrange(desc(win_percentage))
+
+head(all_wins_percentage_official, 10)
+```
+
+Have these teams always been at the top? We will now look at top teams by decade, again only considering competitive matches.
+
+```{r}
+results_decade <- results_official %>%
+  mutate(decade = cut(year, 
+                      seq(1870, 2030, 10),
+                      dig.lab = 4, 
+                      right = FALSE)
+  )
+
+country_by_decade_official <- tibble(
+  country = c(results_decade$home_team, results_decade$away_team),
+  year = c(results_decade$year, results_decade$year),
+  decade = c(results_decade$decade, results_decade$decade)
+) %>% 
+  arrange(year)
+
+all_matches_by_decade_official <- country_by_decade_official %>%
+  group_by(country, decade) %>%
+  summarise(total_matches = length(country)) %>%
+  na.omit()
+
+all_wins_by_decade_official <- tibble(
+  country = results_decade$winning_team,
+  decade = results_decade$decade
+) %>% 
+  group_by(country, decade) %>%
+  summarise(wins = length(country)) %>%
+  arrange(desc(wins)) %>%
+  na.omit()
+
+all_wins_percentage_by_decade_official <- full_join(all_matches_by_decade_official, all_wins_by_decade_official) %>%
+  mutate(
+    win_percentage = round(wins/total_matches * 100, 2)
+  ) %>%
+  group_by(decade) %>%
+  filter(total_matches >= 10) %>%
+  top_n(n = 5, wt = win_percentage) %>%
+  arrange(desc(win_percentage)) %>%
+  mutate(reversed_row = rev(row_number()))
+
+#head(all_wins_percentage_by_decade_official, 10)
+```
+
+* Some key observations:
+  + The original 4 nations from the UK did not maintain their dominance despite inventing the sport.
+  + Due to the fact that most international matches are played against regional opponents, small island nations such as New Caledonia, Tahiti, Jersey show up in some decades due to their regional dominance, thus high win percentage may not reflect true strength.
+  + As expected, nations with high win percentage in total, such as Brazil or Germany, have multiple decades featuring in the top 5.
+
+```{r, fig.width=10}
+ggplot(all_wins_percentage_by_decade_official, 
+       aes(x = win_percentage, y = reversed_row, fill = country)) +
+  geom_col(stat = "identity") +
+  geom_text(aes(label = country, x = 0, hjust = 0)) +
+  facet_wrap(~ decade, scales = "free_y") +
+  scale_y_discrete(breaks = all_wins_percentage_by_decade_official$reversed_row) +
+  labs(title = "Top 5 teams by win percentage for each decade", 
+       x = "Win Percentage", 
+       y = "Country") +
+  guides(fill = "none")
+```
+
+What if we looked at regional performance? Europe and South America are known to be the strongest regions but let's see how they have done over the years. Note that we only consider matches played against opponents from different regions.
+
+```{r}
+results_region <- results_decade %>%
+  filter(home_region != away_region)
+
+region_by_decade_official <- tibble(
+  region = c(results_region$home_region, results_region$away_region),
+  year = c(results_region$year, results_region$year),
+  decade = c(results_region$decade, results_region$decade)
+) %>% 
+  arrange(year)
+
+region_matches_by_decade_official <- region_by_decade_official %>%
+  group_by(region, decade) %>%
+  summarise(total_matches = length(region)) %>%
+  na.omit()
+
+region_wins_by_decade_official <- tibble(
+  region = results_region$winning_region,
+  decade = results_region$decade
+) %>% 
+  group_by(region, decade) %>%
+  summarise(wins = length(region)) %>%
+  arrange(desc(wins)) %>%
+  na.omit()
+
+region_wins_percentage_by_decade_official <- full_join(region_matches_by_decade_official, region_wins_by_decade_official) %>%
+  mutate(
+    win_percentage = round(wins/total_matches * 100, 2)
+  ) %>%
+  group_by(decade) %>%
+  filter(total_matches >= 10) %>%
+  arrange(desc(win_percentage)) %>%
+  mutate(reversed_row = rev(row_number()))
+```
+* Some key observations:
+  + Data seems to suggest that North America is one of the strongest regions in world football, going against the known narrative that Europe and South America dominates. This could be due to the fact that North America, Central America and the Caribbean often play each other, thus North America could have built up a high win percentage by constantly playing the weaker Central American and Carribbean teams.
+  + It is clear that Africa, the Caribbean and Asia are generally the weaker 3 regions.
+  + Although data suggests that South America is not strong, ultimately, the results of the FIFA World Cup say otherwise, as the only region besides Europe to ever win it, with a combined 9 titles. This can also be explained by the win percentage of the region being pulled down by its weaker teams, i.e. Brazil does well individually but its fellow South American countries struggle.
+
+```{r, fig.width=10}
+ggplot(region_wins_percentage_by_decade_official, 
+       aes(x = win_percentage, y = reversed_row, fill = region)) +
+  geom_col(stat = "identity") +
+  geom_text(aes(label = region, x = 0, hjust = 0)) +
+  facet_wrap(~ decade, scales = "free_y") +
+  scale_y_discrete(breaks = region_wins_percentage_by_decade_official$reversed_row) +
+  labs(title = "Win percentage by regions in inter-regional matches by decade", 
+       x = "Win Percentage", 
+       y = "Region") +
+  guides(fill = "none")
+```
+
+## Determinants of performance
+
+We will now look at possible factors that determine performance. We will look at widely proposed determinants of footballing success, such as economics resources and population size.
+
+However, it is difficult to use wins or win-percentage as these are aggregated over a period of time. GDP and population will vary within the chosen time-span.
+
+Instead, we will use FIFA World Rankings, which in essence, measure a nation's current standing in the game at that point in time. As such, we are able to draw a comparison with GDP & population data by looking at the rankings at specific points in time.
+
+Datasets used:
+
+FIFA World Rankings [Source](https://www.kaggle.com/cashncarry/fifaworldranking) [Methodlogy](https://en.wikipedia.org/wiki/FIFA_World_Rankings)
+
+GDP by Country by Year in Current $USD [Source](https://data.worldbank.org/indicator/NY.GDP.MKTP.CD?name_desc=false)
+
+Population by Country by Year [Source](https://data.worldbank.org/indicator/SP.POP.TOTL)
+
+Firstly, we load up our new datasets and make sure everything is in order before we start our analysis.
+```{r}
+rankings <- read.csv('fifa_rankings.csv', stringsAsFactors = FALSE)
+gdp <- read.csv('gdp.csv', stringsAsFactors = FALSE)
+pop <- read.csv('population.csv', stringsAsFactors = FALSE)
+
+#summary(rankings)
+#str(rankings)
+#summary(gdp)
+#str(gdp)
+#summary(pop)
+#str(pop)
+
+rankings$rank_date <- as.Date(rankings$rank_date, "%Y-%m-%d")
+rankings <- rankings %>% 
+  mutate(
+    rank_year = as.numeric(format(rank_date, "%Y"))
+  )
+names(gdp) <- sub("X", "", names(gdp))
+gdp_long <- gdp %>%
+  rename(Country = ï..Country.Name) %>%
+  pivot_longer(c(5:ncol(gdp)), names_to = "year", values_to = "gdp") %>%
+  select(-c(Country.Code, Indicator.Name, Indicator.Code))
+gdp_long$year = as.numeric(gdp_long$year)
+
+names(pop) <- sub("X", "", names(pop))
+pop_long <- pop %>%
+  rename(Country = ï..Country.Name) %>%
+  pivot_longer(c(5:ncol(pop)), names_to = "year", values_to = "population") %>%
+  select(-c(Country.Code, Indicator.Name, Indicator.Code))
+pop_long$year = as.numeric(pop_long$year)
+```
+
+Next, we merge the 3 data sets by year.
+
+```{r}
+combined_rankings_yearly <- rankings %>%
+  group_by(country_full, rank_year) %>%
+  summarise(across(total_points, mean)) %>%
+  rename(average_total_points = total_points) %>%
+  left_join(gdp_long, by = c('country_full' = 'Country', 'rank_year' = 'year')) %>%
+  left_join(pop_long, by = c('country_full' = 'Country', 'rank_year' = 'year')) %>%
+  ungroup() %>%
+  na.omit() %>%
+  mutate(
+    gdp_per_capita = gdp / population
+  )
+```
+We will now examine the trend of how GDP & Population move with FIFA Ranking points. Note that for our regression analysis, we will use heteroskedasticity-robust standard errors.
+
+Firstly, we regress gdp against points. P-value suggests relationship is statistically significant at 1% significance level. As expected, higher GDP is linked with stronger performance in international football, which could possibly be due to the fact that richer nations have more economic resources and thus investment in the sport.
+
+```{r, fig.width=10}
+lm_gdp = lm(average_total_points ~ gdp, data = combined_rankings_yearly)
+summary(lm_gdp)
+coeftest(lm_gdp, vcov = vcovHC(lm_gdp, type = "HC1"))
+
+ggplot(combined_rankings_yearly,
+       aes(x = gdp, y = average_total_points)) +
+  geom_point(shape = 1, color = viridis(1)) +
+  geom_smooth(method = "lm", se = FALSE, color = "yellow") + 
+  labs(title = "Regression of FIFA Ranking Points on GDP", 
+       x = "GDP", 
+       y = "FIFA Ranking Points")
+```
+
+Next, we regress population against points. P-value suggests relationship is statistically significant at 5% significance level, but not 1% significance level. As expected, larger population is linked with stronger performance in international football. A larger population could mean a bigger pool of potential talent.
+
+```{r, fig.width=10}
+lm_pop = lm(average_total_points ~ population, data = combined_rankings_yearly)
+summary(lm_pop)
+coeftest(lm_pop, vcov = vcovHC(lm_pop, type = "HC1"))
+
+ggplot(combined_rankings_yearly,
+       aes(x = population, y = average_total_points)) +
+  geom_point(shape = 1, color = viridis(1)) +
+  geom_smooth(method = "lm", se = FALSE, color = "yellow") +
+  labs(title = "Regression of FIFA Ranking Points on Population", 
+       x = "Population", 
+       y = "FIFA Ranking Points")
+```
+
+Subsequently, we shall try a multivariate regression with both GDP and population. Although coefficients on both factors are statistically significant, adjusted R-squared is only 0.09073, thus there is still a lot of variation currently unaccounted for and there are clearly other factors that affect football performance besides GDP and population. Visually, it appears that GDP is more important in determining performance in international football.
+
+```{r, fig.width=10}
+lm_gdp_pop = lm(average_total_points ~ gdp + population, data = combined_rankings_yearly)
+summary(lm_gdp_pop)
+coeftest(lm_gdp_pop, vcov = vcovHC(lm_gdp_pop, type = "HC1"))
+
+ggplot(combined_rankings_yearly, 
+       aes(x = population, y = gdp, size = average_total_points, color = average_total_points)) + 
+  geom_point(shape = 16) + 
+  scale_color_viridis() +
+  labs(title = "Regression of FIFA Ranking Points on GDP & Population", 
+       x = "Population", 
+       y = "GDP", 
+       size = "FIFA Ranking Points", 
+       color = "FIFA Ranking Points")
+```
