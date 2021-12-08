@@ -16,6 +16,11 @@ knitr::opts_chunk$set(message = FALSE, warning = FALSE)
 
 ```
 
+## Introduction
+
+I came across some datasets on Kaggle relating to football and as a fan of the sport, I decided to practice and learn R through analysing these datasets.
+
+
 
 Datasets used:
 
@@ -424,3 +429,9 @@ ggplot(combined_rankings_yearly,
        size = "FIFA Ranking Points", 
        color = "FIFA Ranking Points")
 ```
+
+## Conclusion
+
+Overall, when analysing historical performances, looking at all-time wins or win percentage yields no surprises. But breaking it down on a decade by decade basis reveals some interesting findings, such as tiny island Tahiti having the highest win-percentage for 2 consecutive decades (1970-1990).
+
+GDP and population also have a statistically significant relationship with performance, although it is clear there are many other factors that we have yet to explore and account for.
