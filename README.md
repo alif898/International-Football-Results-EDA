@@ -1,2 +1,2 @@
 View output at:
-http://htmlpreview.github.io/?https://github.com/alif898/internationalfootball/blob/main/main.html
+https://htmlpreview.github.io/?https://github.com/alif898/International-Football-Results-EDA/blob/main/main.html
